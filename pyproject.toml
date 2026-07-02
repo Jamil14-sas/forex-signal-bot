@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forex-signal-bot"
+version = "1.0.0"
+description = "Telegram bot for forex market sentiment and technical analysis with trading signals"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+dependencies = [
+    "aiogram>=3.13,<4.0",
+    "httpx[http2]>=0.27,<0.30",
+    "requests>=2.32,<3.0",
+    "yfinance>=0.2.50",
+    "pandas>=2.2",
+    "numpy>=2.1",
+    "vaderSentiment>=3.3",
+    "pydantic>=2.4,<3.0",
+    "pydantic-settings>=2.0,<3.0",
+    "python-dotenv>=1.0,<2.0",
+    "structlog>=24.4,<26.0",
+]
+
+[project.scripts]
+forex-signal-bot = "forex_signal.main:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,33 @@
+# Sensitive — NEVER commit API keys
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Docker
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.db
+*.sqlite
+
+# Archives
+*.tar.gz
+*.zip
+
+# Demo outputs
+*.png
