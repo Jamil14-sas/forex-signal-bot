@@ -6,7 +6,8 @@ from datetime import date
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..config import get_settings
 from ..db.base import get_db_session
@@ -16,13 +17,71 @@ from ..services.data_service import FOREX_PAIRS, resolve_pair
 from ..services.formatter import (
     format_error,
     format_help,
+    format_multi_timeframe_analysis,
     format_signal,
+    format_subscription_status,
+    format_welcome,
     split_long_message,
 )
 
 router = Router(name="forex-signal")
 
 _settings = get_settings()
+
+MAJOR_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "NZD/USD", "USD/CAD", "USD/CHF"]
+
+
+# ── Keyboard Builders ──────────────────────────────────────────────────────────
+
+
+def _signal_kb(pair: str, current_tf: str) -> InlineKeyboardMarkup:
+    """Keyboard for signal/analysis results."""
+    b = InlineKeyboardBuilder()
+    b.button(text="🔄 Refresh", callback_data=f"signal:{pair}:{current_tf}")
+    b.button(text="⏱ 1h", callback_data=f"signal:{pair}:1h")
+    b.button(text="⏱ 4h", callback_data=f"signal:{pair}:4h")
+    b.button(text="⏱ 1d", callback_data=f"signal:{pair}:1d")
+    b.button(text="📋 Pairs", callback_data="list_pairs")
+    b.adjust(1, 3, 1)
+    return b.as_markup()
+
+
+def _multianalysis_kb(pair: str) -> InlineKeyboardMarkup:
+    """Keyboard for multi-timeframe analysis."""
+    b = InlineKeyboardBuilder()
+    b.button(text="🔄 Refresh", callback_data=f"multianalysis:{pair}")
+    b.button(text="📋 Pairs", callback_data="list_pairs")
+    b.adjust(2)
+    return b.as_markup()
+
+
+def _welcome_kb() -> InlineKeyboardMarkup:
+    """Keyboard for welcome message."""
+    b = InlineKeyboardBuilder()
+    for p in MAJOR_PAIRS[:4]:
+        b.button(text=p, callback_data=f"signal:{p}:")
+    b.button(text="📋 All Pairs", callback_data="list_pairs")
+    b.adjust(4, 1)
+    return b.as_markup()
+
+
+def _pairs_kb() -> InlineKeyboardMarkup:
+    """Keyboard with major pairs."""
+    b = InlineKeyboardBuilder()
+    for p in MAJOR_PAIRS:
+        b.button(text=p, callback_data=f"signal:{p}:")
+    b.adjust(2)
+    return b.as_markup()
+
+
+def _timeframe_kb(current: str) -> InlineKeyboardMarkup:
+    """TF selector keyboard."""
+    b = InlineKeyboardBuilder()
+    for tf in ["5m", "15m", "1h", "4h", "1d", "1wk"]:
+        label = f" {'✅' if tf == current else ''} {tf}"
+        b.button(text=label, callback_data=f"set_tf:{tf}")
+    b.adjust(3)
+    return b.as_markup()
 
 # Lightweight in-memory rate limiter (per-second burst)
 _rate_limit_store: dict[int, list[float]] = {}
@@ -83,27 +142,15 @@ async def _ensure_user(
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
     name = message.from_user.first_name or "trader"
-    # Ensure user exists in DB
     await _ensure_user(
         message.from_user.id,
         message.from_user.username,
         message.from_user.first_name,
     )
-    text = (
-        f"👋 <b>Welcome, {name}!</b>\n\n"
-        "I'm a forex signal bot. I analyze live forex data, compute technical "
-        "indicators (SMA, RSI, MACD, Bollinger Bands, SMC), and combine it with "
-        "market sentiment to generate trading signals.\n\n"
-        "<b>Quick start:</b>\n"
-        "  /signal EUR/USD — get a trading signal\n"
-        "  /analysis EUR/USD — full technical breakdown\n"
-        "  /multianalysis EUR/USD — multi-timeframe analysis\n"
-        "  /sentiment EUR/USD — news & event sentiment\n"
-        "  /pairs — list all available pairs\n"
-        "  /subscribe — scheduled daily signals\n"
-        "  /help — full command reference"
+    await message.answer(
+        format_welcome(name),
+        reply_markup=_welcome_kb(),
     )
-    await message.answer(text)
 
 
 @router.message(Command("help"))
@@ -118,7 +165,11 @@ async def cmd_help(message: Message) -> None:
 
 @router.message(Command("pairs"))
 async def cmd_pairs(message: Message) -> None:
-    await message.answer(format_pairs_list(FOREX_PAIRS))
+    from ..services.formatter import format_pairs_list
+    await message.answer(
+        format_pairs_list(FOREX_PAIRS),
+        reply_markup=_pairs_kb(),
+    )
 
 
 @router.message(Command("timeframe"))
@@ -130,12 +181,10 @@ async def cmd_timeframe(message: Message) -> None:
     )
     args = (message.text or "").split(maxsplit=1)
     if len(args) < 2 or not args[1].strip():
-        valid = "5m, 15m, 30m, 1h, 4h, 1d"
         current = await _get_user_timeframe(message.from_user.id)
         await message.answer(
-            f"⏱ Current timeframe: <b>{current}</b>\n"
-            f"Usage: /timeframe <i>tf</i>\n"
-            f"Options: {valid}"
+            f"⏱ Current: <b>{current}</b>\nSelect a timeframe below 👇",
+            reply_markup=_timeframe_kb(current),
         )
         return
 
@@ -146,7 +195,7 @@ async def cmd_timeframe(message: Message) -> None:
         return
 
     await _set_user_timeframe(message.from_user.id, tf)
-    await message.answer(f"✅ Timeframe set to <b>{tf}</b>")
+    await message.answer(f"✅ Timeframe set to <b>{tf}</b>", reply_markup=_timeframe_kb(tf))
 
 
 # ---- Signal command ---------------------------------------------------------
@@ -213,7 +262,8 @@ async def cmd_signal(message: Message, analysis_service: AnalysisService) -> Non
         formatted = format_signal(analysis.signal, analysis.sentiment)
         chunks = split_long_message(formatted)
 
-        await status.edit_text(chunks[0])
+        kb = _signal_kb(pair, tf)
+        await status.edit_text(chunks[0], reply_markup=kb)
         for chunk in chunks[1:]:
             await message.answer(chunk)
 
@@ -276,7 +326,8 @@ async def cmd_analysis(message: Message, analysis_service: AnalysisService) -> N
         formatted = format_signal(analysis.signal, analysis.sentiment)
         chunks = split_long_message(formatted)
 
-        await status.edit_text(chunks[0])
+        kb = _signal_kb(pair, tf)
+        await status.edit_text(chunks[0], reply_markup=kb)
         for chunk in chunks[1:]:
             await message.answer(chunk)
 
@@ -396,13 +447,11 @@ async def cmd_multianalysis(message: Message, analysis_service: AnalysisService)
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Build response
-        from ..services.formatter import format_multi_timeframe_analysis
-
         response = format_multi_timeframe_analysis(pair, timeframes, results)
         chunks = split_long_message(response)
 
-        await status.edit_text(chunks[0])
+        kb = _multianalysis_kb(pair)
+        await status.edit_text(chunks[0], reply_markup=kb)
         for chunk in chunks[1:]:
             await message.answer(chunk)
 
@@ -734,8 +783,105 @@ def _format_pairs_list(pairs: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-# ---- Callback: refresh signal ------------------------------------------------
+# ── Callback Handlers ──────────────────────────────────────────────────────────
 
-@router.callback_query(F.data == "refresh_signal")
-async def on_refresh(call: CallbackQuery, analysis_service: AnalysisService) -> None:
-    await call.answer("Refresh not yet implemented — use /signal <pair> again", show_alert=True)
+
+@router.callback_query(lambda c: c.data and c.data.startswith("signal:"))
+async def on_signal_callback(call: CallbackQuery, analysis_service: AnalysisService) -> None:
+    """Handle signal_ buttons: signal:EUR/USD:1h"""
+    parts = call.data.split(":")
+    pair = parts[1] if len(parts) > 1 else "EUR/USD"
+    tf = parts[2] if len(parts) > 2 and parts[2] else None
+
+    if tf is None:
+        tf = await _get_user_timeframe(call.from_user.id)
+
+    await call.answer(f"Analyzing {pair} ({tf})...")
+    try:
+        analysis = await analysis_service.analyze(
+            pair, timeframe=tf,
+            account_balance=_settings.default_account_balance,
+            risk_percent=_settings.default_risk_percent,
+        )
+        formatted = format_signal(analysis.signal, analysis.sentiment)
+        chunks = split_long_message(formatted)
+
+        kb = _signal_kb(pair, tf)
+
+        # Try to edit the original message with first chunk
+        try:
+            await call.message.edit_text(chunks[0], reply_markup=kb)
+        except Exception:
+            await call.message.answer(chunks[0], reply_markup=kb)
+
+        for chunk in chunks[1:]:
+            await call.message.answer(chunk)
+
+        # Save signal
+        async with await get_db_session() as session:
+            await repo.save_signal(
+                session,
+                user_id=call.from_user.id,
+                pair=analysis.signal.pair,
+                timeframe=tf,
+                direction=analysis.signal.direction.value,
+                confidence=analysis.signal.confidence,
+                entry_price=analysis.signal.current_price,
+                stop_loss=analysis.signal.stop_loss,
+                take_profit=", ".join(analysis.signal.take_profit) if analysis.signal.take_profit else None,
+            )
+
+    except Exception as e:
+        await call.message.answer(format_error(str(e)))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("multianalysis:"))
+async def on_multianalysis_callback(call: CallbackQuery, analysis_service: AnalysisService) -> None:
+    """Handle multianalysis buttons."""
+    pair = call.data.split(":", 1)[1] if ":" in call.data else "EUR/USD"
+    await call.answer(f"Multi-TF analysis for {pair}...")
+
+    try:
+        user_tf = await _get_user_timeframe(call.from_user.id)
+        timeframes = list(dict.fromkeys([user_tf, "4h", "1d"]))[:3]
+
+        import asyncio
+        tasks = [analysis_service.analyze(pair, timeframe=tf) for tf in timeframes]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        response = format_multi_timeframe_analysis(pair, timeframes, results)
+        chunks = split_long_message(response)
+
+        kb = _multianalysis_kb(pair)
+        try:
+            await call.message.edit_text(chunks[0], reply_markup=kb)
+        except Exception:
+            await call.message.answer(chunks[0], reply_markup=kb)
+        for chunk in chunks[1:]:
+            await call.message.answer(chunk)
+    except Exception as e:
+        await call.message.answer(format_error(str(e)))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("set_tf:"))
+async def on_set_tf_callback(call: CallbackQuery) -> None:
+    """Handle timeframe selector buttons."""
+    tf = call.data.split(":", 1)[1]
+    await _set_user_timeframe(call.from_user.id, tf)
+    await call.answer(f"Timeframe set to {tf}")
+    # Update the message keyboard to show new selection
+    try:
+        await call.message.edit_reply_markup(reply_markup=_timeframe_kb(tf))
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "list_pairs")
+async def on_list_pairs_callback(call: CallbackQuery) -> None:
+    """Handle pairs list button."""
+    await call.answer()
+    from ..services.formatter import format_pairs_list
+    await call.message.answer(
+        format_pairs_list(FOREX_PAIRS),
+        reply_markup=_pairs_kb(),
+    )
