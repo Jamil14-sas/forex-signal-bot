@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import Optional
 
 import pandas as pd
 
@@ -13,7 +14,7 @@ from ..config import Settings, get_settings
 from .data_service import DataService, resolve_display_name, resolve_pair
 from .indicators import SMCResult, compute_smc
 from .sentiment import SentimentResult, SentimentService
-from .signal_service import SignalService, TradeSignal
+from .signal_service import RiskInfo, SignalService, TradeSignal
 
 logger = structlog.get_logger(__name__)
 
@@ -23,6 +24,14 @@ class FullAnalysis:
     signal: TradeSignal
     sentiment: SentimentResult | None
     df: pd.DataFrame
+
+
+@dataclass
+class TimeframeAnalysis:
+    timeframe: str
+    signal: TradeSignal
+    sentiment: SentimentResult | None
+    error: str | None = None
 
 
 class AnalysisService:
@@ -48,6 +57,8 @@ class AnalysisService:
         timeframe: str = "1h",
         *,
         include_sentiment: bool = True,
+        account_balance: Optional[float] = None,
+        risk_percent: Optional[float] = None,
     ) -> FullAnalysis:
         """Run a full analysis for a forex pair."""
         display = resolve_display_name(resolve_pair(pair) or pair)
@@ -72,6 +83,22 @@ class AnalysisService:
         except Exception:
             smc = SMCResult()
 
+        # Compute risk info
+        risk_info = None
+        if account_balance is not None and risk_percent is not None:
+            atr = None
+            try:
+                from .indicators import compute_atr
+                atr = compute_atr(df)
+            except Exception:
+                pass
+            if atr:
+                risk_info = RiskInfo(
+                    account_balance=account_balance,
+                    risk_percent=risk_percent,
+                    atr=atr,
+                )
+
         # Generate signal
         sentiment_score = sentiment.score if sentiment else 0.0
         signal = self._signals.generate(
@@ -80,6 +107,37 @@ class AnalysisService:
             timeframe=timeframe,
             smc_result=smc,
             sentiment_score=sentiment_score,
+            risk_info=risk_info,
         )
 
         return FullAnalysis(signal=signal, sentiment=sentiment, df=df)
+
+    async def analyze_multi_timeframe(
+        self,
+        pair: str,
+        timeframes: list[str],
+        *,
+        include_sentiment: bool = True,
+    ) -> list[TimeframeAnalysis]:
+        """Run analysis concurrently across multiple timeframes."""
+        display = resolve_display_name(resolve_pair(pair) or pair)
+
+        async def _analyze_one(tf: str) -> TimeframeAnalysis:
+            try:
+                full = await self.analyze(pair, timeframe=tf, include_sentiment=include_sentiment)
+                return TimeframeAnalysis(
+                    timeframe=tf,
+                    signal=full.signal,
+                    sentiment=full.sentiment,
+                )
+            except Exception as exc:
+                logger.warning("multianalysis_failed", pair=pair, timeframe=tf, error=str(exc))
+                return TimeframeAnalysis(
+                    timeframe=tf,
+                    signal=None,  # type: ignore[arg-type]
+                    sentiment=None,
+                    error=str(exc),
+                )
+
+        tasks = [_analyze_one(tf) for tf in timeframes]
+        return await asyncio.gather(*tasks)

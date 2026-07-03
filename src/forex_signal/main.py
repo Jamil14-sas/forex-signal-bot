@@ -13,6 +13,8 @@ from aiogram.enums import ParseMode
 from .bot.handlers import router
 from .bot.middleware import AnalysisServiceMiddleware
 from .config import get_settings
+from .db.base import close_db, init_db
+from .scheduler.broadcast import run_broadcast_scheduler
 from .services.analysis_service import AnalysisService
 
 
@@ -23,6 +25,11 @@ async def main() -> None:
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN is not set. Create a .env file with your bot token from @BotFather."
         )
+
+    # Initialize database
+    print("🗄️  Initializing database...")
+    await init_db()
+    print("   Database ready.")
 
     bot = Bot(
         token=settings.telegram_bot_token,
@@ -57,17 +64,35 @@ async def main() -> None:
         name="bot-polling",
     )
 
+    # Start broadcast scheduler (if enabled)
+    broadcast_task: asyncio.Task | None = None
+    if settings.broadcast_enabled:
+        broadcast_task = asyncio.create_task(
+            run_broadcast_scheduler(bot, analysis_service, interval_seconds=60),
+            name="broadcast-scheduler",
+        )
+        print("   📡 Broadcast scheduler enabled.")
+    else:
+        print("   📡 Broadcast scheduler disabled (broadcast_enabled=False).")
+
     print("✅ Bot is running. Press Ctrl+C to stop.\n")
 
     await stop_event.wait()
 
+    # Shutdown
     await dp.stop_polling()
     polling_task.cancel()
     with suppress(asyncio.CancelledError):
         await polling_task
 
+    if broadcast_task is not None:
+        broadcast_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await broadcast_task
+
     await bot.session.close()
     await analysis_service.close()
+    await close_db()
     print("✅ Bot stopped.")
 
 

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "forex-signal-bot"
 version = "1.0.0"
 description = "Telegram bot for forex market sentiment and technical analysis with trading signals"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 
 dependencies = [
@@ -17,10 +17,11 @@ dependencies = [
     "pandas>=2.2",
     "numpy>=2.1",
     "vaderSentiment>=3.3",
-    "pydantic>=2.4,<3.0",
-    "pydantic-settings>=2.0,<3.0",
+    "pydantic>=1.10,<3.0",
     "python-dotenv>=1.0,<2.0",
     "structlog>=24.4,<26.0",
+    "sqlalchemy[asyncio]>=2.0,<3.0",
+    "aiosqlite>=0.20,<1.0",
 ]
 
 [project.scripts]

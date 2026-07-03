@@ -41,9 +41,17 @@ python -m forex_signal.main
 | `/help` | Full command reference |
 | `/signal <pair>` | Trading signal with entry/SL/TP |
 | `/analysis <pair>` | Full technical analysis |
+| `/multianalysis <pair>` | Multi-timeframe analysis (3 TFs) |
 | `/sentiment <pair>` | News & event sentiment |
 | `/pairs` | List all currency pairs |
 | `/timeframe <tf>` | Set timeframe (5m, 15m, 1h, 4h, 1d) |
+| `/history` | Recent signal history |
+| `/stats` | Signal win rate statistics |
+| `/resolve won/lost <id>` | Mark signal outcome |
+| `/subscribe [time] [pairs]` | Daily scheduled signal broadcasts |
+| `/unsubscribe` | Cancel scheduled signals |
+| `/mytime HH:MM` | Change broadcast time (UTC) |
+| `/mypairs pair1,pair2` | Change tracked pairs |
 
 ## Architecture
 
@@ -51,13 +59,19 @@ python -m forex_signal.main
 forex-signal-bot/src/forex_signal/
 ├── main.py              # Bot entry point
 ├── config.py            # Pydantic settings
+├── db/                  # Database layer (SQLAlchemy async)
+│   ├── base.py          #   Engine, session factory, init/close
+│   ├── models.py        #   ORM models (User, SignalRecord, Subscription)
+│   └── repository.py    #   CRUD operations
+├── scheduler/           # Scheduled signal broadcasts
+│   └── broadcast.py     #   Auto-analyze & send to subscribers
 ├── services/
 │   ├── data_service.py  # OANDA + yfinance data fetching
 │   ├── indicators.py    # Technical indicators + SMC
-│   ├── signal_service.py # Weighted signal generation
+│   ├── signal_service.py # Weighted signal gen + risk mgmt
 │   ├── sentiment.py     # News + economic calendar
-│   ├── analysis_service.py # Orchestrator
-│   └── formatter.py     # Telegram HTML formatting
+│   ├── analysis_service.py # Orchestrator + multi-tf analysis
+│   └── formatter.py     # Telegram HTML formatting + risk display
 └── bot/
-    └── handlers.py      # aiogram command handlers
+    └── handlers.py      # aiogram command handlers (DB-backed)
 ```

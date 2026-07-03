@@ -5,7 +5,7 @@ from __future__ import annotations
 from html import escape
 
 from .indicators import IndicatorResult, SignalDirection
-from .signal_service import SignalStrength, TradeSignal
+from .signal_service import RiskInfo, SignalStrength, TradeSignal
 from .sentiment import SentimentResult
 
 TELEGRAM_MESSAGE_LIMIT = 4096
@@ -122,6 +122,24 @@ def format_signal(signal: TradeSignal, sentiment: SentimentResult | None = None)
                 for ev in high_events[:5]:
                     lines.append(f"    • {escape(ev['currency'])}: {escape(ev['event'])} ({escape(ev['frequency'])})")
 
+    # Risk management
+    if signal.risk_info and signal.direction != SignalDirection.NEUTRAL:
+        r = signal.risk_info
+        lines.append("")
+        lines.append("🛡 <b>Risk Management</b>")
+        if r.risk_amount > 0:
+            lines.append(f"  💵 Risk per trade: <b>${r.risk_amount:.2f}</b> ({r.risk_percent:.1f}% of ${r.account_balance:,.0f})")
+        if r.position_size > 0:
+            lines.append(f"  📐 Position size: <b>{r.position_size:.4f}</b> units")
+        if r.risk_reward_ratio > 0:
+            rr_emoji = "🟢" if r.risk_reward_ratio >= 2 else ("🟡" if r.risk_reward_ratio >= 1 else "🔴")
+            lines.append(f"  {rr_emoji} Risk/Reward: <b>1:{r.risk_reward_ratio}</b>")
+        if r.max_drawdown_warning:
+            lines.append(f"  ⚠️ <b>Drawdown warning:</b> 5 consecutive losses would exceed safe limits")
+        # Trailing stop
+        trail = r.calc_trailing_stop(signal.current_price, signal.current_price, signal.direction)
+        lines.append(f"  🎯 Trailing stop activation: <code>{trail:.5f}</code>")
+
     # Summary
     lines.append("")
     lines.append(f"📝 <b>Summary</b>: {escape(signal.summary)}")
@@ -153,26 +171,120 @@ def format_help() -> str:
     return """🧭 <b>Forex Signal Bot — Commands</b>
 
 <b>Analysis</b>
-  /signal <i>pair</i> — Get a trading signal (e.g., /signal EUR/USD)
-  /analysis <i>pair</i> — Full technical analysis with all indicators
-  /sentiment <i>pair</i> — Market sentiment analysis
-  /pairs — List available forex pairs
+  /signal <i>pair</i> — Trading signal (e.g., /signal EUR/USD)
+  /analysis <i>pair</i> — Full technical analysis
+  /multianalysis <i>pair</i> — Multi-timeframe analysis (3 TFs)
+  /sentiment <i>pair</i> — News & event sentiment
+  /pairs — List all available forex pairs
+
+<b>History & Stats</b>
+  /history — Your recent signal history
+  /stats — Win rate & performance
+  /resolve <i>won|lost</i> <i>id</i> — Mark signal outcome
+
+<b>Scheduled Signals</b>
+  /subscribe [time] [pairs] — Daily signal broadcasts
+  /unsubscribe — Cancel broadcasts
+  /mytime HH:MM — Change broadcast time (UTC)
+  /mypairs EUR/USD,GBP/USD — Change tracked pairs
 
 <b>Settings</b>
   /timeframe <i>tf</i> — Set timeframe: 5m, 15m, 1h, 4h, 1d
   /help — Show this help
 
 <b>How it works</b>
-1. The bot fetches live forex data from OANDA (or Yahoo Finance as fallback)
-2. Computes technical indicators: SMA, RSI, MACD, Bollinger Bands, SMC
+1. Fetches live forex data from OANDA (Yahoo Finance fallback)
+2. Computes SMA, RSI, MACD, Bollinger Bands, SMC patterns
 3. Analyzes market sentiment from news headlines
-4. Generates a trading signal with entry, stop loss, and take profit levels
+4. Generates signal with entry/SL/TP + risk management (R:R, position sizing)
 
 <i>⚠️ Not financial advice. Trade responsibly.</i>"""
 
 
 def format_error(error_msg: str) -> str:
     return f"❌ <b>Error</b>: {escape(error_msg)}"
+
+
+def format_multi_timeframe_analysis(
+    pair: str,
+    timeframes: list[str],
+    results: list,
+) -> str:
+    """Format a multi-timeframe analysis showing all timeframes + confluence."""
+    lines = [
+        f"📊 <b>Multi-Timeframe Analysis — {pair}</b>",
+        f"Analyzed across: {', '.join(f'<code>{tf}</code>' for tf in timeframes)}",
+        "",
+    ]
+
+    # Confluence score
+    direction_map = {}
+    for i, r in enumerate(results):
+        if isinstance(r, Exception) or r.signal is None:
+            continue
+        direction_map[timeframes[i]] = r.signal.direction.value
+
+    buy_count = sum(1 for d in direction_map.values() if d == "BUY")
+    sell_count = sum(1 for d in direction_map.values() if d == "SELL")
+    neutral_count = sum(1 for d in direction_map.values() if d == "NEUTRAL")
+    total = len(direction_map) or 1
+
+    if buy_count > sell_count and buy_count >= 2:
+        confluence = "🟢 <b>BULLISH CONFLUENCE</b>"
+        con_pct = buy_count / total * 100
+    elif sell_count > buy_count and sell_count >= 2:
+        confluence = "🔴 <b>BEARISH CONFLUENCE</b>"
+        con_pct = sell_count / total * 100
+    else:
+        confluence = "🟡 <b>MIXED / NEUTRAL</b>"
+        con_pct = max(buy_count, sell_count) / total * 100
+
+    bar_filled = round(con_pct / 10)
+    bar = "█" * bar_filled + "░" * (10 - bar_filled)
+    lines.append(f"{confluence}")
+    lines.append(f"   <code>{bar}</code> {con_pct:.0f}% agreement")
+    lines.append(f"   🟢{buy_count}  🔴{sell_count}  🟡{neutral_count}")
+    lines.append("")
+
+    # Individual timeframe results
+    for i, tf in enumerate(timeframes):
+        r = results[i]
+        lines.append(f"─── <b>{tf}</b> {'─' * (20 - len(tf))}")
+
+        if isinstance(r, Exception):
+            lines.append(f"   ❌ Error: {r}")
+            lines.append("")
+            continue
+
+        if r.signal is None:
+            lines.append(f"   ❌ Error: {r.error}")
+            lines.append("")
+            continue
+
+        emoji = "🟢" if r.signal.direction == SignalDirection.BUY else (
+            "🔴" if r.signal.direction == SignalDirection.SELL else "🟡"
+        )
+        conf_bar = format_confidence_bar(r.signal.confidence)
+        lines.append(f"   {emoji} <b>{r.signal.direction.value}</b> — {conf_bar}")
+        lines.append(f"   💰 <code>{r.signal.current_price:.5f}</code>")
+        if r.signal.direction != SignalDirection.NEUTRAL:
+            lines.append(f"   🛑 SL: <code>{r.signal.stop_loss}</code>")
+            if r.signal.take_profit:
+                lines.append(f"   🏁 TP: <code>{', '.join(r.signal.take_profit)}</code>")
+        if r.signal.risk_info and r.signal.risk_info.risk_reward_ratio > 0:
+            lines.append(f"   📊 R:R 1:{r.signal.risk_info.risk_reward_ratio}")
+        lines.append("")
+
+    lines.append("<i>⚠️ Not financial advice. Trade responsibly.</i>")
+    return "\n".join(lines)
+
+
+def format_confidence_bar(percent: float) -> str:
+    """Format a confidence bar (reusable outside signal context)."""
+    p = max(0, min(100, float(percent)))
+    filled = round(p / 10)
+    bar = "█" * filled + "░" * (10 - filled)
+    return f"<code>{bar}</code> {p:.0f}%"
 
 
 def split_long_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:

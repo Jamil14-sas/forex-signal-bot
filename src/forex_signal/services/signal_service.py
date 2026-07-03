@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+from dataclasses import dataclass
+
 import pandas as pd
 
 from .indicators import (
@@ -27,6 +29,41 @@ class SignalStrength(Enum):
 
 
 @dataclass
+class RiskInfo:
+    """Risk management calculations for a trade."""
+    account_balance: float
+    risk_percent: float
+    atr: float
+    position_size: float = 0.0
+    risk_amount: float = 0.0
+    risk_reward_ratio: float = 0.0
+    max_drawdown_warning: bool = False
+
+    def calc_position_size(self, entry: float, stop_loss: float) -> None:
+        """Calculate position size based on account risk."""
+        risk_per_trade = self.account_balance * (self.risk_percent / 100.0)
+        price_risk = abs(entry - stop_loss)
+        if price_risk > 0:
+            self.position_size = risk_per_trade / price_risk
+        self.risk_amount = risk_per_trade
+
+    def calc_risk_reward(self, entry: float, stop_loss: float, take_profit: float) -> None:
+        """Calculate risk/reward ratio."""
+        risk = abs(entry - stop_loss)
+        reward = abs(take_profit - entry)
+        if risk > 0:
+            self.risk_reward_ratio = round(reward / risk, 2)
+
+    def calc_trailing_stop(self, entry: float, current_price: float, direction: SignalDirection) -> float:
+        """Calculate trailing stop level using ATR."""
+        atr_multiple = 2.0
+        if direction == SignalDirection.BUY:
+            return current_price - (self.atr * atr_multiple)
+        else:
+            return current_price + (self.atr * atr_multiple)
+
+
+@dataclass
 class TradeSignal:
     pair: str
     timeframe: str
@@ -42,6 +79,7 @@ class TradeSignal:
     divergence: SignalDirection = SignalDirection.NEUTRAL
     summary: str = ""
     sentiment_score: float = 0.0  # from sentiment analysis
+    risk_info: RiskInfo | None = None  # risk management calculations
 
 
 # Indicator weight for signal scoring
@@ -64,6 +102,7 @@ class SignalService:
         *,
         smc_result: SMCResult | None = None,
         sentiment_score: float = 0.0,
+        risk_info: RiskInfo | None = None,
     ) -> TradeSignal:
         df_ind, indicators = compute_indicators(df)
 
@@ -182,6 +221,21 @@ class SignalService:
 
         summary = " | ".join(parts)
 
+        # Risk management calculations
+        if risk_info is not None and direction != SignalDirection.NEUTRAL:
+            sl_price = float(stop_loss) if stop_loss != "N/A" else 0
+            tp_prices = [float(tp) for tp in take_profit if tp != "N/A"]
+            risk_info.calc_position_size(current_price, sl_price)
+            if tp_prices:
+                risk_info.calc_risk_reward(current_price, sl_price, tp_prices[0])
+            # Check max drawdown
+            if risk_info.risk_amount > 0:
+                consecutive_losses = 5  # assume worst case
+                total_risk = risk_info.risk_amount * consecutive_losses
+                drawdown_pct = (total_risk / risk_info.account_balance) * 100
+                if drawdown_pct > 20:  # configurable
+                    risk_info.max_drawdown_warning = True
+
         return TradeSignal(
             pair=pair,
             timeframe=timeframe,
@@ -197,4 +251,5 @@ class SignalService:
             divergence=divergence,
             summary=summary,
             sentiment_score=sentiment_score,
+            risk_info=risk_info,
         )
